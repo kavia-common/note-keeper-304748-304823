@@ -7,8 +7,9 @@ import React from "react";
  * @param {(patch: {title?: string, content?: string}) => void} props.onChange
  * @param {() => void} props.onDelete
  * @param {() => void} props.onCreateFirst
+ * @param {(value: number|string|Date) => string} props.formatUpdatedAt
  */
-function NoteEditor({ note, loading, onChange, onDelete, onCreateFirst }) {
+function NoteEditor({ note, loading, onChange, onDelete, onCreateFirst, formatUpdatedAt }) {
   if (loading) {
     return (
       <main className="editor" aria-label="Editor">
@@ -29,8 +30,8 @@ function NoteEditor({ note, loading, onChange, onDelete, onCreateFirst }) {
       <main className="editor" aria-label="Editor">
         <div className="editorCard">
           <div className="emptyState" role="status" aria-live="polite">
-            <div className="emptyTitle">Select a note</div>
-            <div className="emptyText">Choose a note from the sidebar, or create a new one.</div>
+            <div className="emptyTitle">No note selected</div>
+            <div className="emptyText">Select a note from the sidebar, or create a new one.</div>
             <button className="btn btnPrimary" onClick={onCreateFirst} type="button">
               Create a note
             </button>
@@ -40,6 +41,8 @@ function NoteEditor({ note, loading, onChange, onDelete, onCreateFirst }) {
     );
   }
 
+  const updatedLabel = formatUpdatedAt?.(note.updatedAt || Date.now());
+
   return (
     <main className="editor" aria-label="Editor">
       <div className="editorCard">
@@ -48,10 +51,12 @@ function NoteEditor({ note, loading, onChange, onDelete, onCreateFirst }) {
             <div className="editorKicker">Editor</div>
             <div className="editorMeta">
               <span className="pill">Autosaved</span>
-              <span className="dot" aria-hidden="true" />
-              <span className="muted">
-                Updated {new Date(note.updatedAt || Date.now()).toLocaleString()}
-              </span>
+              {updatedLabel ? (
+                <>
+                  <span className="dot" aria-hidden="true" />
+                  <span className="muted">Updated {updatedLabel}</span>
+                </>
+              ) : null}
             </div>
           </div>
 
@@ -78,13 +83,14 @@ function NoteEditor({ note, loading, onChange, onDelete, onCreateFirst }) {
             className="textarea"
             value={note.content || ""}
             onChange={(e) => onChange({ content: e.target.value })}
-            placeholder="Write your note… (Markdown optional)"
+            placeholder="Write your note…"
           />
         </label>
 
         <div className="hint">
-          Tip: Use <span className="kbd">Ctrl</span> / <span className="kbd">⌘</span> +{" "}
-          <span className="kbd">K</span> to focus search.
+          Shortcuts: <span className="kbd">Ctrl</span> / <span className="kbd">⌘</span> + <span className="kbd">N</span>{" "}
+          new note, <span className="kbd">Ctrl</span> / <span className="kbd">⌘</span> + <span className="kbd">F</span>{" "}
+          search.
         </div>
       </div>
     </main>

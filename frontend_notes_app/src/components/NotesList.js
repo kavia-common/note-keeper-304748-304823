@@ -10,8 +10,19 @@ import React, { useMemo } from "react";
  * @param {(id: string) => void} props.onSelect
  * @param {boolean} props.loading
  * @param {boolean} props.backendEnabled
+ * @param {(value: number|string|Date) => string} props.formatUpdatedAt
  */
-function NotesList({ notes, selectedId, query, onQueryChange, onCreate, onSelect, loading, backendEnabled }) {
+function NotesList({
+  notes,
+  selectedId,
+  query,
+  onQueryChange,
+  onCreate,
+  onSelect,
+  loading,
+  backendEnabled,
+  formatUpdatedAt,
+}) {
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return notes;
@@ -30,9 +41,7 @@ function NotesList({ notes, selectedId, query, onQueryChange, onCreate, onSelect
           <div className="brandMark" aria-hidden="true" />
           <div className="brandText">
             <div className="brandTitle">Ocean Notes</div>
-            <div className="brandSub">
-              {backendEnabled ? "Synced (backend)" : "Local (browser)"}
-            </div>
+            <div className="brandSub">{backendEnabled ? "Synced (backend)" : "Local (browser)"}</div>
           </div>
         </div>
 
@@ -47,7 +56,7 @@ function NotesList({ notes, selectedId, query, onQueryChange, onCreate, onSelect
             className="input"
             value={query}
             onChange={(e) => onQueryChange(e.target.value)}
-            placeholder="Filter by title or content…"
+            placeholder="Search notes…"
             type="search"
           />
         </label>
@@ -64,9 +73,7 @@ function NotesList({ notes, selectedId, query, onQueryChange, onCreate, onSelect
           <div className="emptyState compact" role="status" aria-live="polite">
             <div className="emptyTitle">{notes.length === 0 ? "No notes yet" : "No matches"}</div>
             <div className="emptyText">
-              {notes.length === 0
-                ? "Create your first note to get started."
-                : "Try a different search term."}
+              {notes.length === 0 ? "Create your first note in Ocean Notes." : "Try a different search."}
             </div>
             {notes.length === 0 && (
               <button className="btn btnSecondary" onClick={onCreate} type="button">
@@ -77,7 +84,9 @@ function NotesList({ notes, selectedId, query, onQueryChange, onCreate, onSelect
         ) : (
           filtered.map((n) => {
             const isActive = n.id === selectedId;
-            const subtitle = (n.content || "").trim().split("\n").find(Boolean) || "No content";
+            const snippet = (n.content || "").trim().split("\n").find(Boolean) || "No content yet";
+            const updatedLabel = formatUpdatedAt?.(n.updatedAt || n.createdAt || Date.now());
+
             return (
               <button
                 key={n.id}
@@ -88,7 +97,9 @@ function NotesList({ notes, selectedId, query, onQueryChange, onCreate, onSelect
                 aria-current={isActive ? "true" : "false"}
               >
                 <div className="noteRowTitle">{n.title || "Untitled"}</div>
-                <div className="noteRowSub">{subtitle}</div>
+                <div className="noteRowSub">
+                  {updatedLabel ? `Updated ${updatedLabel} • ${snippet}` : snippet}
+                </div>
               </button>
             );
           })

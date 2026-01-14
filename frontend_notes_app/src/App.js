@@ -19,6 +19,41 @@ function useDebouncedValue(value, delayMs) {
   return debounced;
 }
 
+/**
+ * Friendly short date formatting for note list/editor metadata.
+ * - Shows "Today 2:34 PM" / "Yesterday 11:10 AM" when applicable
+ * - Otherwise uses a compact "YYYY-MM-DD HH:mm" format
+ * Data stays ISO/epoch; this is purely presentation.
+ * @param {number|string|Date} value
+ * @returns {string}
+ */
+function formatUpdatedAt(value) {
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return "";
+
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const startOfThatDay = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const dayDiff = Math.round((startOfThatDay.getTime() - startOfToday.getTime()) / (24 * 60 * 60 * 1000));
+
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+
+  if (dayDiff === 0) return `Today ${time}`;
+  if (dayDiff === -1) return `Yesterday ${time}`;
+
+  const pad2 = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+/**
+ * Returns a new array sorted by descending updatedAt (most recently updated first).
+ * @param {Array<{updatedAt?: number}>} list
+ * @returns {Array}
+ */
+function sortByMostRecentlyUpdated(list) {
+  return [...list].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+}
+
 // PUBLIC_INTERFACE
 function App() {
   const backendEnabled = isBackendEnabled();
@@ -37,14 +72,76 @@ function App() {
   // Local editor draft to make typing instantaneous even if persistence is async.
   const [draft, setDraft] = useState(null);
 
-  // Keep draft in sync when switching selection or when notes update.
+  // Track selection id explicitly to implement "unsaved changes" behavior when switching notes.
+  const prevSelectedIdRef = useRef(null);
+
+  // Keep draft in sync when switching selection. If there are unsaved changes, try to autosave first,
+  // and only fall back to a gentle confirm if saving fails.
   useEffect(() => {
-    if (!selectedNote) {
-      setDraft(null);
-      return;
+    let alive = true;
+
+    async function handleSelectionChange() {
+      const prevSelectedId = prevSelectedIdRef.current;
+      const nextSelectedId = selectedId;
+
+      // First run: initialize ref and draft.
+      if (prevSelectedId === null) {
+        prevSelectedIdRef.current = nextSelectedId;
+        if (selectedNote) setDraft(selectedNote);
+        else setDraft(null);
+        return;
+      }
+
+      // Not a selection switch.
+      if (prevSelectedId === nextSelectedId) return;
+
+      // Attempt to protect unsaved edits on the previous note.
+      const prevNote = notes.find((n) => n.id === prevSelectedId) || null;
+      const draftIsForPrev = draft?.id === prevSelectedId;
+
+      const hasUnsavedEdits =
+        Boolean(prevNote && draftIsForPrev) &&
+        ((prevNote.title || "") !== (draft.title || "") || (prevNote.content || "") !== (draft.content || ""));
+
+      if (hasUnsavedEdits) {
+        try {
+          setBusy(true);
+          const updated = await updateNote(prevSelectedId, { title: draft.title, content: draft.content });
+          if (!alive) return;
+
+          setNotes((prev) => sortByMostRecentlyUpdated(prev.map((n) => (n.id === updated.id ? updated : n))));
+        } catch (e) {
+          if (!alive) return;
+
+          const message = e instanceof Error ? e.message : "Failed to save note.";
+          // Gentle confirm fallback: never lose edits silently.
+          const discard = window.confirm(
+            `We couldn't save your changes:\n\n${message}\n\nDiscard changes and switch notes?`
+          );
+          if (!discard) {
+            // Revert the selection back; keep the draft in place.
+            setSelectedId(prevSelectedId);
+            return;
+          }
+        } finally {
+          if (alive) setBusy(false);
+        }
+      }
+
+      // Safe to switch draft to the new selected note.
+      prevSelectedIdRef.current = nextSelectedId;
+      if (!selectedNote) {
+        setDraft(null);
+      } else {
+        setDraft(selectedNote);
+      }
     }
-    setDraft(selectedNote);
-  }, [selectedNote?.id]); // intentionally only when selection changes
+
+    handleSelectionChange();
+    return () => {
+      alive = false;
+    };
+  }, [selectedId, selectedNote, notes, draft]);
 
   const debouncedDraft = useDebouncedValue(draft, 350);
 
@@ -58,10 +155,11 @@ function App() {
       try {
         const loaded = await listNotes();
         if (!alive) return;
-        setNotes(loaded);
+        const sorted = sortByMostRecentlyUpdated(Array.isArray(loaded) ? loaded : []);
+        setNotes(sorted);
 
-        if (loaded.length > 0) {
-          setSelectedId((prev) => prev || loaded[0].id);
+        if (sorted.length > 0) {
+          setSelectedId((prev) => prev || sorted[0].id);
         } else {
           setSelectedId(null);
         }
@@ -102,7 +200,7 @@ function App() {
         });
 
         if (!alive) return;
-        setNotes((prev) => prev.map((n) => (n.id === updated.id ? updated : n)).sort((a, b) => b.updatedAt - a.updatedAt));
+        setNotes((prev) => sortByMostRecentlyUpdated(prev.map((n) => (n.id === updated.id ? updated : n))));
       } catch (e) {
         if (!alive) return;
         setError(e instanceof Error ? e.message : "Failed to save note.");
@@ -115,27 +213,40 @@ function App() {
     };
   }, [debouncedDraft, notes]);
 
-  // Keyboard shortcut: Ctrl/Cmd+K to focus search.
+  // Keyboard shortcuts:
+  // - Cmd/Ctrl+N => create new note
+  // - Cmd/Ctrl+F => focus search
   useEffect(() => {
     function onKeyDown(e) {
-      const isK = e.key.toLowerCase() === "k";
-      if (!isK) return;
       const isAccel = e.ctrlKey || e.metaKey;
       if (!isAccel) return;
-      e.preventDefault();
-      searchInputRef.current?.focus?.();
+
+      const key = e.key.toLowerCase();
+
+      if (key === "n") {
+        e.preventDefault();
+        handleCreate();
+        return;
+      }
+
+      if (key === "f") {
+        e.preventDefault();
+        searchInputRef.current?.focus?.();
+      }
     }
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [handleCreate]);
 
   const handleCreate = useCallback(async () => {
     setBusy(true);
     setError("");
     try {
       const created = await createNote({ title: "Untitled", content: "" });
-      setNotes((prev) => [created, ...prev]);
+
+      // Always keep most recently updated first.
+      setNotes((prev) => sortByMostRecentlyUpdated([created, ...prev]));
       setSelectedId(created.id);
       setQuery("");
       // allow editor draft to initialize immediately
@@ -167,7 +278,7 @@ function App() {
     setError("");
     try {
       await deleteNote(selectedNote.id);
-      setNotes((prev) => prev.filter((n) => n.id !== selectedNote.id));
+      setNotes((prev) => sortByMostRecentlyUpdated(prev.filter((n) => n.id !== selectedNote.id)));
 
       // Select next best note
       const remaining = notes.filter((n) => n.id !== selectedNote.id);
@@ -186,8 +297,8 @@ function App() {
         <div className="topBarInner">
           <div className="topBarLeft">
             <div className="statusDot" aria-hidden="true" />
-            <div className="topBarTitle">Notes</div>
-            <div className="topBarSub">Ocean Professional</div>
+            <div className="topBarTitle">Ocean Notes</div>
+            <div className="topBarSub">{backendEnabled ? "Synced" : "Local"}</div>
           </div>
 
           <div className="topBarRight">
@@ -211,6 +322,7 @@ function App() {
           onSelect={handleSelect}
           loading={loading}
           backendEnabled={backendEnabled}
+          formatUpdatedAt={formatUpdatedAt}
           // internal ref wiring: attach after render
           ref={undefined}
         />
@@ -224,6 +336,7 @@ function App() {
           onChange={handleDraftChange}
           onDelete={handleDelete}
           onCreateFirst={handleCreate}
+          formatUpdatedAt={formatUpdatedAt}
         />
       </div>
     </div>
