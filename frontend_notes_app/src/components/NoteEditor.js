@@ -8,8 +8,19 @@ import React from "react";
  * @param {() => void} props.onDelete
  * @param {() => void} props.onCreateFirst
  * @param {(value: number|string|Date) => string} props.formatUpdatedAt
+ * @param {"idle"|"dirty"|"saving"|"saved"|"error"} [props.saveStatus]
+ * @param {string} [props.saveError]
  */
-function NoteEditor({ note, loading, onChange, onDelete, onCreateFirst, formatUpdatedAt }) {
+function NoteEditor({
+  note,
+  loading,
+  onChange,
+  onDelete,
+  onCreateFirst,
+  formatUpdatedAt,
+  saveStatus = "idle",
+  saveError = "",
+}) {
   if (loading) {
     return (
       <main className="editor" aria-label="Editor">
@@ -43,18 +54,39 @@ function NoteEditor({ note, loading, onChange, onDelete, onCreateFirst, formatUp
 
   const updatedLabel = formatUpdatedAt?.(note.updatedAt || Date.now());
 
+  const statusLabel =
+    saveStatus === "saving"
+      ? "Saving…"
+      : saveStatus === "dirty"
+        ? "Editing…"
+        : saveStatus === "error"
+          ? "Save failed"
+          : saveStatus === "saved"
+            ? "Saved"
+            : "Ready";
+
+  const statusPillClass = saveStatus === "saving" || saveStatus === "dirty" ? "pill pillBusy" : "pill";
+
   return (
     <main className="editor" aria-label="Editor">
       <div className="editorCard">
         <div className="editorHeader">
           <div>
             <div className="editorKicker">Editor</div>
-            <div className="editorMeta">
-              <span className="pill">Autosaved</span>
+            <div className="editorMeta" aria-live="polite">
+              <span className={statusPillClass}>{statusLabel}</span>
               {updatedLabel ? (
                 <>
                   <span className="dot" aria-hidden="true" />
                   <span className="muted">Updated {updatedLabel}</span>
+                </>
+              ) : null}
+              {saveStatus === "error" && saveError ? (
+                <>
+                  <span className="dot" aria-hidden="true" />
+                  <span className="muted" title={saveError}>
+                    Could not save (changes kept locally)
+                  </span>
                 </>
               ) : null}
             </div>

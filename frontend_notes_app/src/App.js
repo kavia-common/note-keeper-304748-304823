@@ -5,21 +5,6 @@ import NoteEditor from "./components/NoteEditor";
 import { createNote, deleteNote, isBackendEnabled, listNotes, updateNote } from "./services/notesRepository";
 
 /**
- * Small debounce hook to prevent writing to storage on every keystroke.
- * @param {any} value
- * @param {number} delayMs
- * @returns {any}
- */
-function useDebouncedValue(value, delayMs) {
-  const [debounced, setDebounced] = useState(value);
-  useEffect(() => {
-    const t = window.setTimeout(() => setDebounced(value), delayMs);
-    return () => window.clearTimeout(t);
-  }, [value, delayMs]);
-  return debounced;
-}
-
-/**
  * Friendly short date formatting for note list/editor metadata.
  * - Shows "Today 2:34 PM" / "Yesterday 11:10 AM" when applicable
  * - Otherwise uses a compact "YYYY-MM-DD HH:mm" format
@@ -47,11 +32,39 @@ function formatUpdatedAt(value) {
 
 /**
  * Returns a new array sorted by descending updatedAt (most recently updated first).
- * @param {Array<{updatedAt?: number}>} list
+ * Accepts either ISO string timestamps or numbers.
+ * @param {Array<{updatedAt?: any}>} list
  * @returns {Array}
  */
 function sortByMostRecentlyUpdated(list) {
-  return [...list].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  return [...list].sort((a, b) => {
+    const aT = a?.updatedAt ? new Date(a.updatedAt).getTime() : 0;
+    const bT = b?.updatedAt ? new Date(b.updatedAt).getTime() : 0;
+    return (Number.isFinite(bT) ? bT : 0) - (Number.isFinite(aT) ? aT : 0);
+  });
+}
+
+/**
+ * Select the next "logical" note after a delete.
+ * Preference: most recently updated (already how the list is ordered).
+ * @param {Array<{id: string}>} remainingSorted
+ * @param {string} deletedId
+ * @returns {string|null}
+ */
+function pickNextSelectionAfterDelete(remainingSorted, deletedId) {
+  const remaining = Array.isArray(remainingSorted) ? remainingSorted.filter((n) => n?.id !== deletedId) : [];
+  return remaining[0]?.id ?? null;
+}
+
+/**
+ * Returns true if two notes differ in title/content (trim-safe).
+ * @param {{title?: string, content?: string}|null} a
+ * @param {{title?: string, content?: string}|null} b
+ * @returns {boolean}
+ */
+function hasContentChanged(a, b) {
+  if (!a || !b) return false;
+  return (a.title || "") !== (b.title || "") || (a.content || "") !== (b.content || "");
 }
 
 // PUBLIC_INTERFACE
@@ -63,7 +76,15 @@ function App() {
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+
+  // Non-intrusive banner area is still used for larger errors, but we avoid spamming it for save churn.
   const [error, setError] = useState("");
+
+  // Editor save UX (subtle, non-blocking)
+  const [saveStatus, setSaveStatus] = useState(
+    /** @type {"idle"|"dirty"|"saving"|"saved"|"error"} */ ("idle")
+  );
+  const [saveError, setSaveError] = useState("");
 
   const searchInputRef = useRef(null);
 
@@ -71,6 +92,125 @@ function App() {
 
   // Local editor draft to make typing instantaneous even if persistence is async.
   const [draft, setDraft] = useState(null);
+
+  // ----- Autosave concurrency control -----
+  // We keep autosave logic fully client-side (no repository contract changes).
+  const saveTimerRef = useRef(/** @type {number|null} */ (null));
+  const saveTokenRef = useRef(/** @type {Record<string, number>} */ ({})); // per-note increasing token
+  const inflightRef = useRef(
+    /** @type {{noteId: string, token: number}|null} */ (null)
+  );
+  const queuedSaveRef = useRef(
+    /** @type {{noteId: string, token: number, payload: {title?: string, content?: string}}|null} */ (null)
+  );
+
+  /**
+   * Increment and return the next save token for the given note.
+   * @param {string} noteId
+   * @returns {number}
+   */
+  function nextSaveToken(noteId) {
+    const current = saveTokenRef.current[noteId] || 0;
+    const next = current + 1;
+    saveTokenRef.current[noteId] = next;
+    return next;
+  }
+
+  /**
+   * Get current save token for note.
+   * @param {string} noteId
+   * @returns {number}
+   */
+  function getSaveToken(noteId) {
+    return saveTokenRef.current[noteId] || 0;
+  }
+
+  /**
+   * Clear any scheduled (debounced) save.
+   */
+  function cancelScheduledSave() {
+    if (saveTimerRef.current) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+  }
+
+  /**
+   * Apply a saved note to state and keep ordering consistent.
+   * @param {any} updated
+   */
+  function applySavedNote(updated) {
+    setNotes((prev) => sortByMostRecentlyUpdated(prev.map((n) => (n.id === updated.id ? updated : n))));
+  }
+
+  /**
+   * Start a save for a note/payload with a token guard.
+   * - If a save is already in-flight, we queue only the latest payload.
+   * - Only apply results if token is still current for that note.
+   *
+   * @param {string} noteId
+   * @param {{title?: string, content?: string}} payload
+   * @param {{setBusyFlag?: boolean, markStatus?: boolean}=} options
+   */
+  async function guardedSave(noteId, payload, options = {}) {
+    const { setBusyFlag = false, markStatus = true } = options;
+
+    // If another save is in-flight, queue the most recent payload and return.
+    if (inflightRef.current) {
+      const token = nextSaveToken(noteId);
+      queuedSaveRef.current = { noteId, token, payload };
+      if (markStatus) setSaveStatus("saving");
+      return;
+    }
+
+    const token = nextSaveToken(noteId);
+    inflightRef.current = { noteId, token };
+    if (setBusyFlag) setBusy(true);
+    if (markStatus) {
+      setSaveStatus("saving");
+      setSaveError("");
+    }
+
+    try {
+      const updated = await updateNote(noteId, payload);
+
+      // Only apply if this is still the latest token for that note.
+      if (getSaveToken(noteId) === token) {
+        applySavedNote(updated);
+
+        // If the draft is still for this note, we keep it as-is (user may be typing).
+        // Save status is "saved" only if current draft matches latest stored content.
+        const currentInState = notes.find((n) => n.id === noteId) || null;
+        const draftForThis = draft?.id === noteId ? draft : null;
+        const changed = draftForThis ? hasContentChanged(draftForThis, currentInState) : false;
+        setSaveStatus(changed ? "dirty" : "saved");
+      }
+    } catch (e) {
+      // Only surface save error if this is still the latest token; otherwise ignore stale errors.
+      if (getSaveToken(noteId) === token) {
+        const message = e instanceof Error ? e.message : "Failed to save note.";
+        setSaveStatus("error");
+        setSaveError(message);
+      }
+    } finally {
+      inflightRef.current = null;
+      if (setBusyFlag) setBusy(false);
+
+      // If there is a queued save, run it next (but only the latest queued payload is kept).
+      if (queuedSaveRef.current) {
+        const queued = queuedSaveRef.current;
+        queuedSaveRef.current = null;
+
+        // If a newer token exists (meaning user typed again after queuing), skip queued.
+        if (getSaveToken(queued.noteId) === queued.token) {
+          // Run queued save without toggling global busy.
+          // Keep status as saving.
+          // eslint-disable-next-line no-use-before-define
+          await guardedSave(queued.noteId, queued.payload, { setBusyFlag: false, markStatus: true });
+        }
+      }
+    }
+  }
 
   // Track selection id explicitly to implement "unsaved changes" behavior when switching notes.
   const prevSelectedIdRef = useRef(null);
@@ -89,11 +229,16 @@ function App() {
         prevSelectedIdRef.current = nextSelectedId;
         if (selectedNote) setDraft(selectedNote);
         else setDraft(null);
+        setSaveStatus("idle");
+        setSaveError("");
         return;
       }
 
       // Not a selection switch.
       if (prevSelectedId === nextSelectedId) return;
+
+      // Cancel any scheduled save; we will decide how to handle the previous note now.
+      cancelScheduledSave();
 
       // Attempt to protect unsaved edits on the previous note.
       const prevNote = notes.find((n) => n.id === prevSelectedId) || null;
@@ -105,45 +250,57 @@ function App() {
 
       if (hasUnsavedEdits) {
         try {
-          setBusy(true);
-          const updated = await updateNote(prevSelectedId, { title: draft.title, content: draft.content });
+          // Do not block the whole UI with busy for a background save.
+          // Also: if a save is already in-flight, guardedSave will queue.
+          if (alive) setSaveStatus("saving");
+          await guardedSave(prevSelectedId, { title: draft.title, content: draft.content }, { setBusyFlag: false });
+
           if (!alive) return;
 
-          setNotes((prev) => sortByMostRecentlyUpdated(prev.map((n) => (n.id === updated.id ? updated : n))));
+          // If save still ended as error, prompt the user; never lose edits silently.
+          if (saveStatus === "error") {
+            const discard = window.confirm(
+              `We couldn't save your changes:\n\n${saveError || "Failed to save note."}\n\nDiscard changes and switch notes?`
+            );
+            if (!discard) {
+              setSelectedId(prevSelectedId);
+              return;
+            }
+          }
         } catch (e) {
           if (!alive) return;
-
           const message = e instanceof Error ? e.message : "Failed to save note.";
-          // Gentle confirm fallback: never lose edits silently.
           const discard = window.confirm(
             `We couldn't save your changes:\n\n${message}\n\nDiscard changes and switch notes?`
           );
           if (!discard) {
-            // Revert the selection back; keep the draft in place.
             setSelectedId(prevSelectedId);
             return;
           }
-        } finally {
-          if (alive) setBusy(false);
         }
       }
 
       // Safe to switch draft to the new selected note.
       prevSelectedIdRef.current = nextSelectedId;
-      if (!selectedNote) {
+      setSaveError("");
+      setSaveStatus("idle");
+
+      if (!nextSelectedId) {
         setDraft(null);
-      } else {
-        setDraft(selectedNote);
+        return;
       }
+
+      const next = notes.find((n) => n.id === nextSelectedId) || null;
+      setDraft(next);
     }
 
     handleSelectionChange();
     return () => {
       alive = false;
     };
+    // Intentionally omit saveStatus/saveError from deps to avoid re-running selection logic due to save churn.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, selectedNote, notes, draft]);
-
-  const debouncedDraft = useDebouncedValue(draft, 350);
 
   // Initial load
   useEffect(() => {
@@ -152,6 +309,8 @@ function App() {
     async function load() {
       setLoading(true);
       setError("");
+      setSaveError("");
+      setSaveStatus("idle");
       try {
         const loaded = await listNotes();
         if (!alive) return;
@@ -177,45 +336,67 @@ function App() {
     };
   }, [backendEnabled]);
 
-  // Autosave debounced draft changes into repository + notes state
+  // Debounced autosave (race-safe via tokens + cancellation on selection switch)
   useEffect(() => {
-    let alive = true;
+    if (!draft || !draft.id) return;
 
-    async function persist() {
-      if (!debouncedDraft) return;
-      if (!debouncedDraft.id) return;
+    const current = notes.find((n) => n.id === draft.id) || null;
+    if (!current) return;
 
-      // If title/content didn't change versus current notes, skip.
-      const current = notes.find((n) => n.id === debouncedDraft.id);
-      if (!current) return;
+    const titleChanged = (current.title || "") !== (draft.title || "");
+    const contentChanged = (current.content || "") !== (draft.content || "");
+    const changed = titleChanged || contentChanged;
 
-      const titleChanged = (current.title || "") !== (debouncedDraft.title || "");
-      const contentChanged = (current.content || "") !== (debouncedDraft.content || "");
-      if (!titleChanged && !contentChanged) return;
-
-      try {
-        const updated = await updateNote(debouncedDraft.id, {
-          title: debouncedDraft.title,
-          content: debouncedDraft.content,
-        });
-
-        if (!alive) return;
-        setNotes((prev) => sortByMostRecentlyUpdated(prev.map((n) => (n.id === updated.id ? updated : n))));
-      } catch (e) {
-        if (!alive) return;
-        setError(e instanceof Error ? e.message : "Failed to save note.");
-      }
+    if (!changed) {
+      // If no changes, reflect saved/idle depending on whether we are currently saving.
+      if (!inflightRef.current && !queuedSaveRef.current) setSaveStatus("saved");
+      return;
     }
 
-    persist();
+    // Mark as dirty immediately for responsive UX.
+    setSaveStatus("dirty");
+    setSaveError("");
+
+    cancelScheduledSave();
+    // Schedule save (debounce)
+    saveTimerRef.current = window.setTimeout(() => {
+      // Ensure we only autosave the currently selected note (active editor note).
+      // If the user has already switched, selection effect handles saving separately.
+      if (selectedId !== draft.id) return;
+
+      guardedSave(draft.id, { title: draft.title, content: draft.content }, { setBusyFlag: false, markStatus: true });
+    }, 450);
+
     return () => {
-      alive = false;
+      // If draft changes again within debounce window, this cleanup cancels it.
+      cancelScheduledSave();
     };
-  }, [debouncedDraft, notes]);
+  }, [draft, notes, selectedId]);
 
   // Keyboard shortcuts:
   // - Cmd/Ctrl+N => create new note
   // - Cmd/Ctrl+F => focus search
+  const handleCreate = useCallback(async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const created = await createNote({ title: "Untitled", content: "" });
+
+      // Always keep most recently updated first.
+      setNotes((prev) => sortByMostRecentlyUpdated([created, ...prev]));
+      setSelectedId(created.id);
+      setQuery("");
+      // allow editor draft to initialize immediately
+      setDraft(created);
+      setSaveStatus("saved");
+      setSaveError("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to create note.");
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
   useEffect(() => {
     function onKeyDown(e) {
       const isAccel = e.ctrlKey || e.metaKey;
@@ -239,25 +420,6 @@ function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [handleCreate]);
 
-  const handleCreate = useCallback(async () => {
-    setBusy(true);
-    setError("");
-    try {
-      const created = await createNote({ title: "Untitled", content: "" });
-
-      // Always keep most recently updated first.
-      setNotes((prev) => sortByMostRecentlyUpdated([created, ...prev]));
-      setSelectedId(created.id);
-      setQuery("");
-      // allow editor draft to initialize immediately
-      setDraft(created);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to create note.");
-    } finally {
-      setBusy(false);
-    }
-  }, []);
-
   const handleSelect = useCallback((id) => {
     setSelectedId(id);
   }, []);
@@ -274,22 +436,36 @@ function App() {
     const ok = window.confirm(`Delete "${selectedNote.title || "Untitled"}"? This cannot be undone.`);
     if (!ok) return;
 
+    // Cancel autosave work for this note to avoid late saves after delete.
+    cancelScheduledSave();
+    queuedSaveRef.current = null;
+    inflightRef.current = null;
+
     setBusy(true);
     setError("");
     try {
-      await deleteNote(selectedNote.id);
-      setNotes((prev) => sortByMostRecentlyUpdated(prev.filter((n) => n.id !== selectedNote.id)));
+      const deletingId = selectedNote.id;
+      await deleteNote(deletingId);
 
-      // Select next best note
-      const remaining = notes.filter((n) => n.id !== selectedNote.id);
-      setSelectedId(remaining[0]?.id ?? null);
-      setDraft(null);
+      // Compute remaining from latest state, sort, and then select next logical note.
+      setNotes((prev) => {
+        const remainingSorted = sortByMostRecentlyUpdated(prev.filter((n) => n.id !== deletingId));
+        const nextId = pickNextSelectionAfterDelete(remainingSorted, deletingId);
+
+        // Keep selection/draft in sync as part of the same state transition.
+        setSelectedId(nextId);
+        setDraft(nextId ? remainingSorted.find((n) => n.id === nextId) || null : null);
+        setSaveStatus("idle");
+        setSaveError("");
+
+        return remainingSorted;
+      });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to delete note.");
     } finally {
       setBusy(false);
     }
-  }, [notes, selectedNote]);
+  }, [selectedNote]);
 
   return (
     <div className="appShell">
@@ -337,6 +513,8 @@ function App() {
           onDelete={handleDelete}
           onCreateFirst={handleCreate}
           formatUpdatedAt={formatUpdatedAt}
+          saveStatus={saveStatus}
+          saveError={saveError}
         />
       </div>
     </div>
