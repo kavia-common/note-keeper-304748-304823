@@ -74,7 +74,7 @@ function hasContentChanged(a, b) {
   return (a.title || "") !== (b.title || "") || (a.content || "") !== (b.content || "");
 }
 
-// PUBLIC_INTERFACE
+/* PUBLIC_INTERFACE */
 function App() {
   const backendEnabled = isBackendEnabled();
 
@@ -101,6 +101,30 @@ function App() {
 
   // Local editor draft to make typing instantaneous even if persistence is async.
   const [draft, setDraft] = useState(null);
+
+  // ----- StrictMode/timing stability helpers -----
+  // In React 18 StrictMode, effects can mount/unmount twice in dev. We keep the latest values
+  // in refs so async code doesn't rely on stale closures (important for CI + flaky timers).
+  const notesRef = useRef(notes);
+  const draftRef = useRef(draft);
+  const saveStatusRef = useRef(saveStatus);
+  const saveErrorRef = useRef(saveError);
+
+  useEffect(() => {
+    notesRef.current = notes;
+  }, [notes]);
+
+  useEffect(() => {
+    draftRef.current = draft;
+  }, [draft]);
+
+  useEffect(() => {
+    saveStatusRef.current = saveStatus;
+  }, [saveStatus]);
+
+  useEffect(() => {
+    saveErrorRef.current = saveError;
+  }, [saveError]);
 
   // ----- Autosave concurrency control -----
   // We keep autosave logic fully client-side (no repository contract changes).
@@ -143,6 +167,9 @@ function App() {
       saveTimerRef.current = null;
     }
   }
+
+  // Ensure no timers leak across unmounts (helps CI determinism).
+  useEffect(() => cancelScheduledSave, []);
 
   /**
    * Apply a saved note to state and keep ordering consistent.
@@ -187,11 +214,11 @@ function App() {
       if (getSaveToken(noteId) === token) {
         applySavedNote(updated);
 
-        // If the draft is still for this note, we keep it as-is (user may be typing).
-        // Save status is "saved" only if current draft matches latest stored content.
-        const currentInState = notes.find((n) => n.id === noteId) || null;
-        const draftForThis = draft?.id === noteId ? draft : null;
+        // Compare against *current* state/draft via refs (avoid stale closure after await).
+        const currentInState = notesRef.current.find((n) => n.id === noteId) || null;
+        const draftForThis = draftRef.current?.id === noteId ? draftRef.current : null;
         const changed = draftForThis ? hasContentChanged(draftForThis, currentInState) : false;
+
         setSaveStatus(changed ? "dirty" : "saved");
       }
     } catch (e) {
@@ -249,27 +276,32 @@ function App() {
       // Cancel any scheduled save; we will decide how to handle the previous note now.
       cancelScheduledSave();
 
-      // Attempt to protect unsaved edits on the previous note.
-      const prevNote = notes.find((n) => n.id === prevSelectedId) || null;
-      const draftIsForPrev = draft?.id === prevSelectedId;
+      // Attempt to protect unsaved edits on the previous note (use refs to avoid stale reads).
+      const prevNote = notesRef.current.find((n) => n.id === prevSelectedId) || null;
+      const prevDraft = draftRef.current;
+      const draftIsForPrev = prevDraft?.id === prevSelectedId;
 
       const hasUnsavedEdits =
         Boolean(prevNote && draftIsForPrev) &&
-        ((prevNote.title || "") !== (draft.title || "") || (prevNote.content || "") !== (draft.content || ""));
+        ((prevNote.title || "") !== (prevDraft.title || "") || (prevNote.content || "") !== (prevDraft.content || ""));
 
       if (hasUnsavedEdits) {
         try {
           // Do not block the whole UI with busy for a background save.
           // Also: if a save is already in-flight, guardedSave will queue.
           if (alive) setSaveStatus("saving");
-          await guardedSave(prevSelectedId, { title: draft.title, content: draft.content }, { setBusyFlag: false });
+          await guardedSave(
+            prevSelectedId,
+            { title: prevDraft.title, content: prevDraft.content },
+            { setBusyFlag: false }
+          );
 
           if (!alive) return;
 
-          // If save still ended as error, prompt the user; never lose edits silently.
-          if (saveStatus === "error") {
+          // If the latest status is error, prompt the user; never lose edits silently.
+          if (saveStatusRef.current === "error") {
             const discard = window.confirm(
-              `We couldn't save your changes:\n\n${saveError || "Failed to save note."}\n\nDiscard changes and switch notes?`
+              `We couldn't save your changes:\n\n${saveErrorRef.current || "Failed to save note."}\n\nDiscard changes and switch notes?`
             );
             if (!discard) {
               setSelectedId(prevSelectedId);
@@ -299,7 +331,7 @@ function App() {
         return;
       }
 
-      const next = notes.find((n) => n.id === nextSelectedId) || null;
+      const next = notesRef.current.find((n) => n.id === nextSelectedId) || null;
       setDraft(next);
     }
 
@@ -309,7 +341,7 @@ function App() {
     };
     // Intentionally omit saveStatus/saveError from deps to avoid re-running selection logic due to save churn.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId, selectedNote, notes, draft]);
+  }, [selectedId, selectedNote]);
 
   // Initial load
   useEffect(() => {
