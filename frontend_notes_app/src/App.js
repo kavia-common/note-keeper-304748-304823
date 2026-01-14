@@ -96,6 +96,10 @@ function App() {
   const [saveError, setSaveError] = useState("");
 
   const searchInputRef = useRef(null);
+  const settingsButtonRef = useRef(null);
+
+  // Focus management: when a new note is created, we focus the editor title for faster keyboard flow.
+  const focusEditorTitleNextRef = useRef(false);
 
   const selectedNote = useMemo(() => notes.find((n) => n.id === selectedId) || null, [notes, selectedId]);
 
@@ -421,6 +425,9 @@ function App() {
     setBusy(true);
     setError("");
     try {
+      // Ensure the next editor render moves focus to the title field.
+      focusEditorTitleNextRef.current = true;
+
       const created = await createNote({ title: "Untitled", content: "" });
 
       // Always keep most recently updated first.
@@ -514,6 +521,25 @@ function App() {
     }
   }, [selectedNote]);
 
+  // Focus the title field after create (or other flows that request it).
+  useEffect(() => {
+    if (!draft?.id) return;
+    if (!focusEditorTitleNextRef.current) return;
+
+    // Wait one paint so the input exists, then focus.
+    const raf = window.requestAnimationFrame(() => {
+      const el = document.getElementById("noteTitle");
+      if (el && typeof el.focus === "function") {
+        el.focus();
+        // Select all text for quick overwrite.
+        if (typeof el.select === "function") el.select();
+      }
+      focusEditorTitleNextRef.current = false;
+    });
+
+    return () => window.cancelAnimationFrame(raf);
+  }, [draft?.id]);
+
   return (
     <div className="appShell">
       <div className="topBar" role="banner">
@@ -539,7 +565,9 @@ function App() {
               onClick={() => setSettingsOpen(true)}
               aria-haspopup="dialog"
               aria-expanded={settingsOpen ? "true" : "false"}
+              aria-label="Open persistence settings"
               data-testid="persistence-settings-button"
+              ref={settingsButtonRef}
             >
               Settings
             </button>
@@ -561,7 +589,11 @@ function App() {
           role="presentation"
           onMouseDown={(e) => {
             // Close when clicking outside the modal content.
-            if (e.target === e.currentTarget) setSettingsOpen(false);
+            if (e.target === e.currentTarget) {
+              setSettingsOpen(false);
+              // restore focus after close
+              window.requestAnimationFrame(() => settingsButtonRef.current?.focus?.());
+            }
           }}
           data-testid="persistence-settings-modal"
         >
@@ -579,7 +611,15 @@ function App() {
                   Current: <strong>{getPersistenceModeLabel()}</strong>
                 </div>
               </div>
-              <button className="iconBtn" type="button" onClick={() => setSettingsOpen(false)} aria-label="Close">
+              <button
+                className="iconBtn"
+                type="button"
+                onClick={() => {
+                  setSettingsOpen(false);
+                  window.requestAnimationFrame(() => settingsButtonRef.current?.focus?.());
+                }}
+                aria-label="Close"
+              >
                 Close
               </button>
             </div>
@@ -605,7 +645,14 @@ function App() {
             </div>
 
             <div className="modalFooter">
-              <button className="btn" type="button" onClick={() => setSettingsOpen(false)}>
+              <button
+                className="btn"
+                type="button"
+                onClick={() => {
+                  setSettingsOpen(false);
+                  window.requestAnimationFrame(() => settingsButtonRef.current?.focus?.());
+                }}
+              >
                 Done
               </button>
             </div>

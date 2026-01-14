@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect } from "react";
 
 /**
  * @param {object} props
@@ -21,6 +21,12 @@ function NoteEditor({
   saveStatus = "idle",
   saveError = "",
 }) {
+  // Announce save failures promptly for assistive tech users.
+  useEffect(() => {
+    if (saveStatus === "error" && saveError) {
+      // no-op: presence of live region below handles announcement
+    }
+  }, [saveStatus, saveError]);
   if (loading) {
     return (
       <main className="editor" aria-label="Editor">
@@ -43,7 +49,7 @@ function NoteEditor({
           <div className="emptyState" role="status" aria-live="polite">
             <div className="emptyTitle">No note selected</div>
             <div className="emptyText">Select a note from the sidebar, or create a new one.</div>
-            <button className="btn btnPrimary" onClick={onCreateFirst} type="button">
+            <button className="btn btnPrimary" onClick={onCreateFirst} type="button" aria-label="Create a new note">
               Create a note
             </button>
           </div>
@@ -70,6 +76,11 @@ function NoteEditor({
   return (
     <main className="editor" aria-label="Editor">
       <div className="editorCard">
+        {/* Save error announcement for screen readers (does not affect visual layout) */}
+        <div className="srOnly" aria-live="assertive" aria-atomic="true">
+          {saveStatus === "error" && saveError ? `Save failed: ${saveError}` : ""}
+        </div>
+
         <div className="editorHeader">
           <div>
             <div className="editorKicker">Editor</div>
@@ -92,7 +103,12 @@ function NoteEditor({
             </div>
           </div>
 
-          <button className="btn btnDanger" onClick={onDelete} type="button">
+          <button
+            className="btn btnDanger"
+            onClick={onDelete}
+            type="button"
+            aria-label={`Delete note ${note.title || "Untitled"}`}
+          >
             Delete
           </button>
         </div>
@@ -105,6 +121,8 @@ function NoteEditor({
             value={note.title || ""}
             onChange={(e) => onChange({ title: e.target.value })}
             placeholder="Untitled"
+            aria-label="Title"
+            autoComplete="off"
           />
         </label>
 
@@ -116,6 +134,7 @@ function NoteEditor({
             value={note.content || ""}
             onChange={(e) => onChange({ content: e.target.value })}
             placeholder="Write your note…"
+            aria-label="Content"
           />
         </label>
 
