@@ -2,7 +2,14 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import "./App.css";
 import NotesList from "./components/NotesList";
 import NoteEditor from "./components/NoteEditor";
-import { createNote, deleteNote, isBackendEnabled, listNotes, updateNote } from "./services/notesRepository";
+import {
+  createNote,
+  deleteNote,
+  getPersistenceModeLabel,
+  isBackendEnabled,
+  listNotes,
+  updateNote,
+} from "./services/notesRepository";
 
 /**
  * Friendly short date formatting for note list/editor metadata.
@@ -76,6 +83,8 @@ function App() {
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Non-intrusive banner area is still used for larger errors, but we avoid spamming it for save churn.
   const [error, setError] = useState("");
@@ -399,6 +408,12 @@ function App() {
 
   useEffect(() => {
     function onKeyDown(e) {
+      // Settings modal: ESC closes.
+      if (e.key === "Escape") {
+        setSettingsOpen(false);
+        return;
+      }
+
       const isAccel = e.ctrlKey || e.metaKey;
       if (!isAccel) return;
 
@@ -478,15 +493,93 @@ function App() {
           </div>
 
           <div className="topBarRight">
+            <span
+              className={`modePill ${backendEnabled ? "modePillSynced" : "modePillLocal"}`}
+              data-testid="persistence-mode-indicator"
+              title="Current persistence mode (driven by env configuration)"
+            >
+              {getPersistenceModeLabel()}
+            </span>
+
+            <button
+              className="iconBtn"
+              type="button"
+              onClick={() => setSettingsOpen(true)}
+              aria-haspopup="dialog"
+              aria-expanded={settingsOpen ? "true" : "false"}
+              data-testid="persistence-settings-button"
+            >
+              Settings
+            </button>
+
             {busy ? <span className="pill pillBusy">Working…</span> : <span className="pill">Ready</span>}
           </div>
         </div>
+
         {error ? (
           <div className="errorBanner" role="alert">
             <strong>Error:</strong> <span>{error}</span>
           </div>
         ) : null}
       </div>
+
+      {settingsOpen ? (
+        <div
+          className="modalOverlay"
+          role="presentation"
+          onMouseDown={(e) => {
+            // Close when clicking outside the modal content.
+            if (e.target === e.currentTarget) setSettingsOpen(false);
+          }}
+          data-testid="persistence-settings-modal"
+        >
+          <div
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Persistence settings"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="modalHeader">
+              <div>
+                <div className="modalTitle">Persistence mode</div>
+                <div className="modalSub">
+                  Current: <strong>{getPersistenceModeLabel()}</strong>
+                </div>
+              </div>
+              <button className="iconBtn" type="button" onClick={() => setSettingsOpen(false)} aria-label="Close">
+                Close
+              </button>
+            </div>
+
+            <div className="modalBody">
+              <p className="modalP">
+                Ocean Notes can run in <strong>Local (browser)</strong> mode or <strong>Synced (backend)</strong> mode.
+                This app selects the mode automatically based on environment variables at build/runtime.
+              </p>
+
+              <div className="modalCallout">
+                <div className="modalCalloutTitle">How to switch modes</div>
+                <div className="modalCalloutText">
+                  Set either <span className="kbd">REACT_APP_API_BASE</span> or <span className="kbd">REACT_APP_BACKEND_URL</span>{" "}
+                  and then reload/restart the app.
+                </div>
+              </div>
+
+              <p className="modalP">
+                No backend configuration is done inside the UI. If you change env vars, you must refresh the page (and
+                typically restart <span className="kbd">npm start</span>) for changes to take effect.
+              </p>
+            </div>
+
+            <div className="modalFooter">
+              <button className="btn" type="button" onClick={() => setSettingsOpen(false)}>
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <div className="layout">
         <NotesList

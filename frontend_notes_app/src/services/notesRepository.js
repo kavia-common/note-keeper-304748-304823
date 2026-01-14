@@ -316,6 +316,18 @@ export function isBackendEnabled() {
 
 /**
  * PUBLIC_INTERFACE
+ * Returns the current persistence mode for the UI, based solely on repository env detection.
+ * - "Local (browser)" when no backend env vars are set
+ * - "Synced (backend)" when REACT_APP_API_BASE or REACT_APP_BACKEND_URL is set
+ *
+ * @returns {"Local (browser)"|"Synced (backend)"}
+ */
+export function getPersistenceModeLabel() {
+  return isBackendEnabled() ? "Synced (backend)" : "Local (browser)";
+}
+
+/**
+ * PUBLIC_INTERFACE
  * Lists notes (backend or local) in consistent updatedAt-desc order.
  * @returns {Promise<Note[]>}
  */
